@@ -19,6 +19,17 @@ func main() {
 }
 
 func chordHandler(w http.ResponseWriter, r *http.Request) {
+	// Set CORS headers for wide-open access
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+
+	// Handle preflight OPTIONS requests
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	// 1) get chord name from /chords/{name} or ?name=
 	chord := ""
 	if q := r.URL.Query().Get("name"); q != "" {
