@@ -135,7 +135,7 @@ func main() {
 		outputPath := filepath.Join(fingeringsDir, fingering+".json")
 
 		// Convert the data to JSON
-		jsonData, err := json.MarshalIndent(chords, "", "    ")
+		jsonData, err := json.Marshal(chords)
 		if err != nil {
 			fmt.Printf("Error creating JSON for fingering %s: %v\n", fingering, err)
 			continue
