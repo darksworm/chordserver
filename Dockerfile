@@ -26,7 +26,7 @@ RUN go build -ldflags="-s -w" -o /app/chordserver ./server.go
 # ──────────────────────────────────────────────────────────────────────────────
 # 2) FINAL STAGE
 # ──────────────────────────────────────────────────────────────────────────────
-FROM alpine:3.19
+FROM alpine:3.21
 
 # Install required libraries for SQLite3
 RUN apk add --no-cache libc6-compat sqlite
