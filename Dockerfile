@@ -30,7 +30,7 @@ FROM scratch
 
 # Copy only the binary and the json folder
 COPY --from=builder /app/chordserver /chordserver
-COPY --from=builder /chords.db /chords.db
+COPY --from=builder /app/chords.db /chords.db
 
 # Expose the port your server listens on
 EXPOSE 8080
