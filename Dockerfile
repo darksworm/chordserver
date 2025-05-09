@@ -26,14 +26,16 @@ RUN go build -ldflags="-s -w" -o /app/chordserver ./server.go
 # ──────────────────────────────────────────────────────────────────────────────
 # 2) FINAL STAGE
 # ──────────────────────────────────────────────────────────────────────────────
-FROM scratch
+FROM alpine:3.19
 
-# Copy only the binary and the json folder
+# Install required libraries for SQLite3
+RUN apk add --no-cache libc6-compat sqlite
+
+# Copy only the binary and the database
 COPY --from=builder /app/chordserver /chordserver
 COPY --from=builder /app/chords.db /chords.db
 
 # Expose the port your server listens on
 EXPOSE 8080
 
-# no shell in scratch, so use exec form
 ENTRYPOINT ["/chordserver"]
