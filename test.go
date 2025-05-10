@@ -47,15 +47,21 @@ func main() {
 
 	// Test search queries
 	testSearches := []struct {
-		name  string
-		query string
+		name           string
+		query          string
+		expectNotFound bool // true if we expect a 404 Not Found response
 	}{
-		{"Chord name - A", "A"},
-		{"Chord name - Am", "Am"},
-		{"Chord name - C7", "C7"},
-		{"Fingering pattern - 022000", "022000"},
-		{"Fingering pattern - 320003", "320003"},
-		{"Ambiguous - A7", "A7"},
+		{"Chord name - A", "A", false},
+		{"Chord name - Am", "Am", false},
+		{"Chord name - C7", "C7", false},
+		{"Fingering pattern - 022000", "022000", false},
+		{"Fingering pattern - 320003", "320003", false},
+		{"Ambiguous - A7", "A7", false},
+		// High fret fingering pattern tests
+		{"High fret pattern - xmxmmm", "xmxmmm", false},
+		{"High fret pattern - xxxmmm", "xxxmmm", false},
+		{"High fret pattern with letters - abcdef", "abcdef", true},
+		{"High fret pattern with mix - 9abcde", "9abcde", true},
 	}
 
 	// Start the server as a separate process with custom port
@@ -261,7 +267,19 @@ func main() {
 		}
 
 		// Check status code
-		if resp.StatusCode != http.StatusOK {
+		if tc.expectNotFound {
+			// For these patterns, we expect a 404 Not Found response
+			if resp.StatusCode == http.StatusNotFound {
+				fmt.Printf("SUCCESS: Search for '%s' correctly returned Not Found as expected\n", tc.query)
+				passedSearchTests++
+				continue
+			} else {
+				fmt.Printf("FAILURE: Search for '%s' should have returned Not Found but got Status: %d\n", tc.query, resp.StatusCode)
+				fmt.Printf("Response: %s\n", string(body))
+				failedSearchTests++
+				continue
+			}
+		} else if resp.StatusCode != http.StatusOK {
 			fmt.Printf("FAILURE: Search for '%s' failed. Status: %d\n", tc.query, resp.StatusCode)
 			fmt.Printf("Response: %s\n", string(body))
 			failedSearchTests++

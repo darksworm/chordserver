@@ -295,9 +295,12 @@ func searchChords(w http.ResponseWriter, r *http.Request) {
 
 // isLikelyFingeringPattern determines if a query is likely a fingering pattern
 func isLikelyFingeringPattern(query string) bool {
-	// Fingering patterns typically contain only digits and 'x' for muted strings
+	// Fingering patterns can contain:
+	// - digits (0-9) for frets 0-9
+	// - lowercase letters (a-z) for frets 10 and above (a=10, b=11, etc.)
+	// - 'x' or 'X' for muted strings
 	for _, c := range query {
-		if !((c >= '0' && c <= '9') || c == 'x' || c == 'X') {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || c == 'x' || c == 'X') {
 			return false
 		}
 	}
