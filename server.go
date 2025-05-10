@@ -3,9 +3,11 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -31,6 +33,10 @@ func corsMiddleware(next http.Handler) http.Handler {
 var db *sql.DB
 
 func main() {
+	// Parse command line flags
+	port := flag.Int("port", 8080, "Port to run the server on")
+	flag.Parse()
+
 	var err error
 	db, err = sql.Open("sqlite3", "chords.db")
 	if err != nil {
@@ -49,13 +55,14 @@ func main() {
 	handler := corsMiddleware(mux)
 
 	// Start server
-	fmt.Println("Server running on http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", handler))
+	addr := fmt.Sprintf(":%d", *port)
+	fmt.Printf("Server running on http://localhost%s\n", addr)
+	log.Fatal(http.ListenAndServe(addr, handler))
 }
 
 func getChordByName(w http.ResponseWriter, r *http.Request) {
 	// Extract chord name from URL
-	chordPath := r.URL.Path[len("/chord/")+1:]
+	chordPath := r.URL.Path[len("/chords/"):]
 	if chordPath == "" {
 		http.Error(w, "Chord name required", http.StatusBadRequest)
 		return
@@ -78,21 +85,93 @@ func getChordByName(w http.ResponseWriter, r *http.Request) {
 		suffix = ""
 	}
 
-	// First try direct lookup
-	var fullData string
-	err := db.QueryRow(`
-		SELECT full_data FROM chords 
-		WHERE key = ? AND suffix = ?
-	`, key, suffix).Scan(&fullData)
+	// Handle special cases for flat and sharp notations
+	alternateKeys := []string{key}
 
-	// If not found, try alias lookup
+	// Map flat notations to sharp equivalents
+	if len(key) == 2 && key[1] == 'b' {
+		switch key[0] {
+		case 'A':
+			alternateKeys = append(alternateKeys, "G#")
+		case 'B':
+			alternateKeys = append(alternateKeys, "A#")
+		case 'C':
+			alternateKeys = append(alternateKeys, "B")
+		case 'D':
+			alternateKeys = append(alternateKeys, "C#")
+		case 'E':
+			alternateKeys = append(alternateKeys, "D#")
+		case 'F':
+			alternateKeys = append(alternateKeys, "E")
+		case 'G':
+			alternateKeys = append(alternateKeys, "F#")
+		}
+	}
+
+	// Handle special enharmonic equivalents
+	if key == "B#" {
+		alternateKeys = append(alternateKeys, "C")
+	} else if key == "E#" {
+		alternateKeys = append(alternateKeys, "F")
+	}
+
+	// Define common suffix aliases
+	suffixVariants := []string{suffix}
+
+	// Add common aliases based on the suffix
+	switch strings.ToLower(suffix) {
+	case "", "major":
+		suffixVariants = append(suffixVariants, "major", "maj", "M", "")
+	case "minor", "min", "m":
+		suffixVariants = append(suffixVariants, "minor", "min", "m")
+	case "5":
+		suffixVariants = append(suffixVariants, "5", "power", "fifth")
+	case "7":
+		suffixVariants = append(suffixVariants, "7", "dominant7", "dom7")
+	case "m7", "min7", "minor7":
+		suffixVariants = append(suffixVariants, "m7", "min7", "minor7")
+	case "maj7", "major7", "M7":
+		suffixVariants = append(suffixVariants, "maj7", "major7", "M7")
+	}
+
+	// First try direct lookup with all key and suffix variants
+	var fullData string
+	var err error
+	for _, keyVariant := range alternateKeys {
+		for _, suffixVariant := range suffixVariants {
+			err = db.QueryRow(`
+				SELECT full_data FROM chords 
+				WHERE key = ? AND suffix = ?
+			`, keyVariant, suffixVariant).Scan(&fullData)
+
+			if err != sql.ErrNoRows {
+				break
+			}
+		}
+		if err != sql.ErrNoRows {
+			break
+		}
+	}
+
+	// If not found, try alias lookup with all key and suffix variants
 	if err == sql.ErrNoRows {
-		err = db.QueryRow(`
-			SELECT c.full_data 
-			FROM chords c
-			JOIN chord_aliases a ON c.id = a.chord_id
-			WHERE a.alias_key = ? AND a.alias_suffix = ?
-		`, key, suffix).Scan(&fullData)
+		for _, keyVariant := range alternateKeys {
+			for _, suffixVariant := range suffixVariants {
+				err = db.QueryRow(`
+					SELECT c.full_data 
+					FROM chords c
+					JOIN chord_aliases a ON c.id = a.chord_id
+					WHERE a.alias_key = ? AND a.alias_suffix = ?
+				`, keyVariant, suffixVariant).Scan(&fullData)
+
+				if err != sql.ErrNoRows {
+					break
+				}
+			}
+			if err != sql.ErrNoRows {
+				break
+			}
+		}
 	}
 
 	if err == sql.ErrNoRows {
