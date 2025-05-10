@@ -393,9 +393,9 @@ func searchByFingeringInMemory(query string) []*ChordWithMeta {
 		}
 	}
 
-	// Limit results to 10
-	if len(results) > 10 {
-		results = results[:10]
+	// limit results to 5
+	if len(results) > 5 {
+		results = results[:5]
 	}
 
 	return results
@@ -410,7 +410,7 @@ func searchByChordName(query string) ([]json.RawMessage, error) {
 			SELECT c.full_data 
 			FROM chords c
 			WHERE c.key = 'A#'
-			LIMIT 10
+			LIMIT 5
 		`)
 
 		if err != nil {
@@ -610,7 +610,7 @@ func searchByChordName(query string) ([]json.RawMessage, error) {
 							WHEN c.suffix = 'major' AND ? = '' THEN 1
 							ELSE 2
 						END
-					LIMIT 10
+					LIMIT 5
 				`, keyVariant, suffixVariant, "minor", "major", keyVariant, suffixVariant, "minor", "major", suffix, suffix, suffix)
 
 				if err != nil {
@@ -702,7 +702,7 @@ func searchByChordName(query string) ([]json.RawMessage, error) {
 				ELSE 2
 			END,
 			LENGTH(c.suffix) ASC
-		LIMIT 10
+		LIMIT 5
 	`, strings.Join(placeholders, " OR "))
 
 	// Add parameters for the ORDER BY clause
@@ -886,9 +886,9 @@ func searchByChordNameInMemory(query string) []*ChordWithMeta {
 	// Sort results by chord type priority
 	sortByChordType(results)
 
-	// Limit results to 10
-	if len(results) > 10 {
-		results = results[:10]
+	// limit results to 5
+	if len(results) > 5 {
+		results = results[:5]
 	}
 
 	return results
@@ -963,8 +963,8 @@ func searchBothInMemory(query string) []*ChordWithMeta {
 	}
 
 	// Limit to 10 results
-	if len(uniqueResults) > 10 {
-		uniqueResults = uniqueResults[:10]
+	if len(uniqueResults) > 5 {
+		uniqueResults = uniqueResults[:5]
 	}
 
 	return uniqueResults
