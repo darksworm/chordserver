@@ -30,7 +30,22 @@ COPY json/ ./json/
 RUN go run build_db.go -source=./json -output=/app/chords.db
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) APP BUILD STAGE
+# 3) TEST STAGE
+# ──────────────────────────────────────────────────────────────────────────────
+FROM base-builder AS test-builder
+
+# Copy the database from db-builder
+COPY --from=db-builder /app/chords.db ./chords.db
+
+# Copy server and test files
+COPY server.go ./
+COPY server_test.go ./
+
+# Run Go tests
+RUN go test -v ./...
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4) APP BUILD STAGE
 # ──────────────────────────────────────────────────────────────────────────────
 FROM base-builder AS app-builder
 
@@ -42,7 +57,7 @@ COPY server.go ./
 RUN go build -ldflags="-s -w" -o /app/chordserver ./server.go
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) FINAL STAGE
+# 5) FINAL STAGE
 # ──────────────────────────────────────────────────────────────────────────────
 FROM alpine:3.21
 
