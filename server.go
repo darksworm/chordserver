@@ -110,7 +110,7 @@ func getChordByName(w http.ResponseWriter, r *http.Request) {
 
 func getChordsByFingering(w http.ResponseWriter, r *http.Request) {
 	// Extract fingering pattern from URL
-	fingering := r.URL.Path[len("/fingering/"):]
+	fingering := r.URL.Path[len("/fingers/"):]
 	if fingering == "" {
 		http.Error(w, "Fingering pattern required", http.StatusBadRequest)
 		return
