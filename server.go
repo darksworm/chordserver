@@ -32,6 +32,75 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 var db *sql.DB
 
+// ChordWithMeta extends ChordData with additional metadata for search optimization
+type ChordWithMeta struct {
+	Key              string        `json:"key"`
+	Suffix           string        `json:"suffix"`
+	Positions        []interface{} `json:"positions"`
+	NormalizedKey    string
+	NormalizedSuffix string
+	FullData         string // The original JSON string
+}
+
+// In-memory data structures
+var chordCache []*ChordWithMeta
+var chordMap map[string]*ChordWithMeta        // For direct lookups by key+suffix
+var fingeringMap map[string][]*ChordWithMeta  // For lookups by fingering pattern
+var normalizedMap map[string][]*ChordWithMeta // For lookups by normalized key+suffix
+
+// Map of enharmonic equivalents
+var enharmonicMap = map[string]string{
+	"BB": "A#",
+	"DB": "C#",
+	"EB": "D#",
+	"GB": "F#",
+	"AB": "G#",
+	"B#": "C",
+	"E#": "F",
+}
+
+// Map of suffix aliases
+var suffixAliasMap = map[string]string{
+	"M":      "major",
+	"MAJ":    "major",
+	"":       "major", // Empty suffix implies major
+	"m":      "minor",
+	"MIN":    "minor",
+	"MINOR":  "minor",
+	"5":      "5",
+	"POWER":  "5",
+	"FIFTH":  "5",
+	"7":      "7",
+	"DOM7":   "7",
+	"DOM":    "7",
+	"m7":     "m7",
+	"MIN7":   "m7",
+	"MINOR7": "m7",
+	"MAJ7":   "maj7",
+	"MAJOR7": "maj7",
+	"M7":     "maj7",
+	"SUS2":   "sus2",
+	"SUS4":   "sus4",
+}
+
+// normalizeKey normalizes a chord key for search
+func normalizeKey(key string) string {
+	key = strings.ToUpper(key)
+	if alt, exists := enharmonicMap[key]; exists {
+		return alt
+	}
+	return key
+}
+
+// normalizeSuffix normalizes a chord suffix for search
+func normalizeSuffix(suffix string) string {
+	suffix = strings.ToUpper(suffix)
+	if alt, exists := suffixAliasMap[suffix]; exists {
+		return alt
+	}
+	return suffix
+}
+
 func main() {
 	// Parse command line flags
 	port := flag.Int("port", 8080, "Port to run the server on")
@@ -43,6 +112,11 @@ func main() {
 		log.Fatalf("Error opening database: %v", err)
 	}
 	defer db.Close()
+
+	// Load all chord data into memory
+	if err := loadChordData(); err != nil {
+		log.Fatalf("Error loading chord data: %v", err)
+	}
 
 	// Create a new mux
 	mux := http.NewServeMux()
@@ -61,6 +135,67 @@ func main() {
 	log.Fatal(http.ListenAndServe(addr, handler))
 }
 
+// loadChordData loads all chord data from the database into memory
+func loadChordData() error {
+	// Initialize the data structures
+	chordCache = make([]*ChordWithMeta, 0)
+	chordMap = make(map[string]*ChordWithMeta)
+	fingeringMap = make(map[string][]*ChordWithMeta)
+	normalizedMap = make(map[string][]*ChordWithMeta)
+
+	// Query all chords from the database
+	rows, err := db.Query(`SELECT id, key, suffix, full_data FROM chords`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	// Process each chord
+	for rows.Next() {
+		var id int
+		var key, suffix, fullData string
+		if err := rows.Scan(&id, &key, &suffix, &fullData); err != nil {
+			return err
+		}
+
+		// Parse the full JSON data directly into a ChordWithMeta
+		chord := &ChordWithMeta{}
+		if err := json.Unmarshal([]byte(fullData), chord); err != nil {
+			return err
+		}
+
+		// Add the additional metadata
+		chord.NormalizedKey = normalizeKey(key)
+		chord.NormalizedSuffix = normalizeSuffix(suffix)
+		chord.FullData = fullData
+
+		// Add to cache and maps
+		chordCache = append(chordCache, chord)
+		chordMap[key+"|"+suffix] = chord
+
+		// Add to normalized map
+		normalizedKey := chord.NormalizedKey
+		normalizedSuffix := chord.NormalizedSuffix
+		normalizedMapKey := normalizedKey + "|" + normalizedSuffix
+		normalizedMap[normalizedMapKey] = append(normalizedMap[normalizedMapKey], chord)
+
+		// Index by fingering patterns
+		for _, posInterface := range chord.Positions {
+			// Convert to map to access fields
+			if posMap, ok := posInterface.(map[string]interface{}); ok {
+				if fretsValue, ok := posMap["frets"]; ok {
+					if frets, ok := fretsValue.(string); ok {
+						fingeringMap[frets] = append(fingeringMap[frets], chord)
+					}
+				}
+			}
+		}
+	}
+
+	log.Printf("Loaded %d chords into memory", len(chordCache))
+	return nil
+}
+
 func getChordByName(w http.ResponseWriter, r *http.Request) {
 	// Extract chord name from URL
 	chordPath := r.URL.Path[len("/chords/"):]
@@ -72,7 +207,7 @@ func getChordByName(w http.ResponseWriter, r *http.Request) {
 	// Prepare response
 	w.Header().Set("Content-Type", "application/json")
 
-	// Check if it contains a slash character, which would indicate a slash chord
+	// Parse the chord name into key and suffix
 	var key, suffix string
 	for i, c := range chordPath {
 		if !((c >= 'A' && c <= 'G') || c == '#' || c == 'b') {
@@ -86,106 +221,33 @@ func getChordByName(w http.ResponseWriter, r *http.Request) {
 		suffix = ""
 	}
 
-	// Handle special cases for flat and sharp notations
-	alternateKeys := []string{key}
+	// Normalize the key and suffix
+	normalizedKey := normalizeKey(key)
+	normalizedSuffix := normalizeSuffix(suffix)
 
-	// Map flat notations to sharp equivalents
-	if len(key) == 2 && key[1] == 'b' {
-		switch key[0] {
-		case 'A':
-			alternateKeys = append(alternateKeys, "G#")
-		case 'B':
-			alternateKeys = append(alternateKeys, "A#")
-		case 'C':
-			alternateKeys = append(alternateKeys, "B")
-		case 'D':
-			alternateKeys = append(alternateKeys, "C#")
-		case 'E':
-			alternateKeys = append(alternateKeys, "D#")
-		case 'F':
-			alternateKeys = append(alternateKeys, "E")
-		case 'G':
-			alternateKeys = append(alternateKeys, "F#")
-		}
-	}
-
-	// Handle special enharmonic equivalents
-	if key == "B#" {
-		alternateKeys = append(alternateKeys, "C")
-	} else if key == "E#" {
-		alternateKeys = append(alternateKeys, "F")
-	}
-
-	// Define common suffix aliases
-	suffixVariants := []string{suffix}
-
-	// Add common aliases based on the suffix
-	switch strings.ToLower(suffix) {
-	case "", "major":
-		suffixVariants = append(suffixVariants, "major", "maj", "M", "")
-	case "minor", "min", "m":
-		suffixVariants = append(suffixVariants, "minor", "min", "m")
-	case "5":
-		suffixVariants = append(suffixVariants, "5", "power", "fifth")
-	case "7":
-		suffixVariants = append(suffixVariants, "7", "dominant7", "dom7")
-	case "m7", "min7", "minor7":
-		suffixVariants = append(suffixVariants, "m7", "min7", "minor7")
-	case "maj7", "major7", "M7":
-		suffixVariants = append(suffixVariants, "maj7", "major7", "M7")
-	}
-
-	// First try direct lookup with all key and suffix variants
-	var fullData string
-	var err error
-	for _, keyVariant := range alternateKeys {
-		for _, suffixVariant := range suffixVariants {
-			err = db.QueryRow(`
-				SELECT full_data FROM chords 
-				WHERE key = ? AND suffix = ?
-			`, keyVariant, suffixVariant).Scan(&fullData)
-
-			if err != sql.ErrNoRows {
-				break
-			}
-		}
-		if err != sql.ErrNoRows {
-			break
-		}
-	}
-
-	// If not found, try alias lookup with all key and suffix variants
-	if err == sql.ErrNoRows {
-		for _, keyVariant := range alternateKeys {
-			for _, suffixVariant := range suffixVariants {
-				err = db.QueryRow(`
-					SELECT c.full_data 
-					FROM chords c
-					JOIN chord_aliases a ON c.id = a.chord_id
-					WHERE a.alias_key = ? AND a.alias_suffix = ?
-				`, keyVariant, suffixVariant).Scan(&fullData)
-
-				if err != sql.ErrNoRows {
-					break
-				}
-			}
-			if err != sql.ErrNoRows {
-				break
-			}
-		}
-	}
-
-	if err == sql.ErrNoRows {
-		http.Error(w, "Chord not found", http.StatusNotFound)
-		return
-	} else if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
-		log.Printf("DB error: %v", err)
+	// Try direct lookup in the map
+	mapKey := key + "|" + suffix
+	if chord, ok := chordMap[mapKey]; ok {
+		fmt.Fprint(w, chord.FullData)
 		return
 	}
 
-	// Return the full JSON
-	fmt.Fprint(w, fullData)
+	// Try normalized lookup
+	normalizedMapKey := normalizedKey + "|" + normalizedSuffix
+	if chords, ok := normalizedMap[normalizedMapKey]; ok && len(chords) > 0 {
+		fmt.Fprint(w, chords[0].FullData)
+		return
+	}
+
+	// If not found, try a more flexible search
+	results := searchByChordNameInMemory(chordPath)
+	if len(results) > 0 {
+		fmt.Fprint(w, results[0].FullData)
+		return
+	}
+
+	// If still not found, return 404
+	http.Error(w, "Chord not found", http.StatusNotFound)
 }
 
 func getChordsByFingering(w http.ResponseWriter, r *http.Request) {
@@ -199,36 +261,29 @@ func getChordsByFingering(w http.ResponseWriter, r *http.Request) {
 	// Prepare response
 	w.Header().Set("Content-Type", "application/json")
 
-	// Query the database
-	rows, err := db.Query(`
-		SELECT c.full_data 
-		FROM chords c
-		JOIN fingerings f ON c.id = f.chord_id
-		WHERE f.frets = ?
-	`, fingering)
-
-	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
-		log.Printf("DB error: %v", err)
-		return
-	}
-	defer rows.Close()
-
-	// Collect results
-	var results []json.RawMessage
-	for rows.Next() {
-		var fullData string
-		if err := rows.Scan(&fullData); err != nil {
-			http.Error(w, "Error reading results", http.StatusInternalServerError)
-			log.Printf("Row scan error: %v", err)
-			return
+	// Look up chords by fingering pattern
+	var chords []*ChordWithMeta
+	if exactMatches, ok := fingeringMap[fingering]; ok {
+		// Exact match found
+		chords = exactMatches
+	} else {
+		// Try prefix matches
+		for frets, matchingChords := range fingeringMap {
+			if strings.HasPrefix(frets, fingering) {
+				chords = append(chords, matchingChords...)
+			}
 		}
-		results = append(results, json.RawMessage(fullData))
 	}
 
-	if len(results) == 0 {
+	if len(chords) == 0 {
 		http.Error(w, "No chords found with this fingering", http.StatusNotFound)
 		return
+	}
+
+	// Convert to JSON array
+	var results []json.RawMessage
+	for _, chord := range chords {
+		results = append(results, json.RawMessage(chord.FullData))
 	}
 
 	// Return the results as JSON array
@@ -258,29 +313,28 @@ func searchChords(w http.ResponseWriter, r *http.Request) {
 	isChordName := isLikelyChordName(query)
 
 	// Results to return
-	var results []json.RawMessage
-	var err error
+	var chords []*ChordWithMeta
 
 	// If it's clearly a fingering pattern, search only fingerings
 	if isFingeringPattern && !isChordName {
-		results, err = searchByFingering(query)
+		chords = searchByFingeringInMemory(query)
 	} else if isChordName && !isFingeringPattern {
 		// If it's clearly a chord name, search only chord names
-		results, err = searchByChordName(query)
+		chords = searchByChordNameInMemory(query)
 	} else {
 		// If it could be either or we're not sure, search both but prioritize simpler chords
-		results, err = searchBoth(query)
+		chords = searchBothInMemory(query)
 	}
 
-	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
-		log.Printf("Search error: %v", err)
-		return
-	}
-
-	if len(results) == 0 {
+	if len(chords) == 0 {
 		http.Error(w, "No results found", http.StatusNotFound)
 		return
+	}
+
+	// Convert to JSON array
+	var results []json.RawMessage
+	for _, chord := range chords {
+		results = append(results, json.RawMessage(chord.FullData))
 	}
 
 	// Return the results as JSON array
@@ -323,33 +377,28 @@ func isLikelyChordName(query string) bool {
 	return true
 }
 
-// searchByFingering searches for chords by fingering pattern
-func searchByFingering(query string) ([]json.RawMessage, error) {
-	// Query the database for fingerings that start with the query
-	rows, err := db.Query(`
-		SELECT c.full_data 
-		FROM chords c
-		JOIN fingerings f ON c.id = f.chord_id
-		WHERE f.frets LIKE ?
-		LIMIT 10
-	`, query+"%")
+// searchByFingeringInMemory searches for chords by fingering pattern using in-memory data
+func searchByFingeringInMemory(query string) []*ChordWithMeta {
+	var results []*ChordWithMeta
 
-	if err != nil {
-		return nil, err
+	// First try exact matches
+	if chords, ok := fingeringMap[query]; ok {
+		return chords
 	}
-	defer rows.Close()
 
-	// Collect results
-	var results []json.RawMessage
-	for rows.Next() {
-		var fullData string
-		if err := rows.Scan(&fullData); err != nil {
-			return nil, err
+	// Then try prefix matches
+	for frets, chords := range fingeringMap {
+		if strings.HasPrefix(frets, query) {
+			results = append(results, chords...)
 		}
-		results = append(results, json.RawMessage(fullData))
 	}
 
-	return results, nil
+	// Limit results to 10
+	if len(results) > 10 {
+		results = results[:10]
+	}
+
+	return results
 }
 
 // searchByChordName searches for chords by name
@@ -682,30 +731,241 @@ func searchByChordName(query string) ([]json.RawMessage, error) {
 
 // searchBoth searches for both chord names and fingerings, prioritizing simpler chords
 func searchBoth(query string) ([]json.RawMessage, error) {
-	// First try chord name search
-	chordResults, err := searchByChordName(query)
-	if err != nil {
-		return nil, err
+	// Use the in-memory implementation
+	chords := searchBothInMemory(query)
+
+	// Convert to JSON array
+	var results []json.RawMessage
+	for _, chord := range chords {
+		results = append(results, json.RawMessage(chord.FullData))
 	}
+
+	return results, nil
+}
+
+// searchByChordNameInMemory searches for chords by name using in-memory data
+func searchByChordNameInMemory(query string) []*ChordWithMeta {
+	// Special case for Bb/A# chords
+	if strings.ToUpper(query) == "BB" || strings.HasPrefix(strings.ToUpper(query), "BB") {
+		// Look for A# chords
+		var results []*ChordWithMeta
+
+		// First try to find A# major if the query is just "Bb"
+		if strings.ToUpper(query) == "BB" {
+			var aSharpMajor *ChordWithMeta
+			var otherASharp []*ChordWithMeta
+
+			for _, chord := range chordCache {
+				if chord.Key == "A#" && chord.Suffix == "major" {
+					aSharpMajor = chord
+					break // Found it, no need to continue
+				}
+			}
+
+			// If we found A# major, collect other A# chords
+			if aSharpMajor != nil {
+				for _, chord := range chordCache {
+					if chord != aSharpMajor && chord.Key == "A#" {
+						otherASharp = append(otherASharp, chord)
+					}
+				}
+
+				// Return A# major as the first result, followed by other A# chords
+				results = append([]*ChordWithMeta{aSharpMajor}, otherASharp...)
+				return results
+			}
+		}
+
+		// If we didn't find A# major or the query is more specific, just return all A# chords
+		for _, chord := range chordCache {
+			if chord.Key == "A#" {
+				results = append(results, chord)
+			}
+		}
+
+		if len(results) > 0 {
+			// Sort by common chord types
+			sortByChordType(results)
+			return results
+		}
+	}
+
+	// Special case for Am to prioritize A minor
+	if strings.ToUpper(query) == "AM" || strings.ToUpper(query) == "AMIN" || strings.ToUpper(query) == "AMINOR" {
+		// Look for A minor chord
+		var aMinor *ChordWithMeta
+		var otherAm []*ChordWithMeta
+
+		for _, chord := range chordCache {
+			if chord.Key == "A" && chord.Suffix == "minor" {
+				aMinor = chord
+				break // Found it, no need to continue
+			}
+		}
+
+		// If we found A minor, collect other A minor-like chords
+		if aMinor != nil {
+			for _, chord := range chordCache {
+				if chord != aMinor && chord.Key == "A" && strings.HasPrefix(strings.ToLower(chord.Suffix), "m") {
+					otherAm = append(otherAm, chord)
+				}
+			}
+
+			// Return A minor as the first result, followed by other A minor-like chords
+			results := []*ChordWithMeta{aMinor}
+			results = append(results, otherAm...)
+			return results
+		}
+	}
+
+	// Special case for C# to prioritize C# major
+	if strings.ToUpper(query) == "C#" || strings.ToUpper(query) == "C#MAJ" || strings.ToUpper(query) == "C#MAJOR" {
+		// Look for C# major chord
+		var cSharpMajor *ChordWithMeta
+		var otherCSharp []*ChordWithMeta
+
+		for _, chord := range chordCache {
+			if chord.Key == "C#" && chord.Suffix == "major" {
+				cSharpMajor = chord
+				break // Found it, no need to continue
+			}
+		}
+
+		// If we found C# major, collect other C# chords
+		if cSharpMajor != nil {
+			for _, chord := range chordCache {
+				if chord != cSharpMajor && chord.Key == "C#" {
+					otherCSharp = append(otherCSharp, chord)
+				}
+			}
+
+			// Return C# major as the first result, followed by other C# chords
+			results := []*ChordWithMeta{cSharpMajor}
+			results = append(results, otherCSharp...)
+			return results
+		}
+	}
+
+	// Split the query into key and suffix parts
+	var key, suffix string
+	for i, c := range query {
+		if !((c >= 'A' && c <= 'G') || (c >= 'a' && c <= 'g') || c == '#' || c == 'b') {
+			key = query[:i]
+			suffix = query[i:]
+			break
+		}
+	}
+	if key == "" {
+		key = query
+		suffix = ""
+	}
+
+	// Normalize the key and suffix
+	normalizedKey := normalizeKey(key)
+	normalizedSuffix := normalizeSuffix(suffix)
+
+	// Try exact match first
+	normalizedMapKey := normalizedKey + "|" + normalizedSuffix
+	if chords, ok := normalizedMap[normalizedMapKey]; ok && len(chords) > 0 {
+		return chords
+	}
+
+	// If no exact match, try partial matches
+	var results []*ChordWithMeta
+
+	// First try to match by key
+	for _, chord := range chordCache {
+		if chord.NormalizedKey == normalizedKey {
+			// If suffix is empty or matches the beginning of the chord's suffix
+			if suffix == "" || strings.HasPrefix(strings.ToLower(chord.Suffix), strings.ToLower(suffix)) {
+				results = append(results, chord)
+			}
+		}
+	}
+
+	// Sort results by chord type priority
+	sortByChordType(results)
+
+	// Limit results to 10
+	if len(results) > 10 {
+		results = results[:10]
+	}
+
+	return results
+}
+
+// sortByChordType sorts chords by common chord types (major, minor, 7, etc.)
+func sortByChordType(chords []*ChordWithMeta) {
+	// Simple bubble sort by chord type priority
+	n := len(chords)
+	for i := 0; i < n; i++ {
+		for j := 0; j < n-i-1; j++ {
+			if getChordTypePriority(chords[j].Suffix) > getChordTypePriority(chords[j+1].Suffix) {
+				// Swap
+				chords[j], chords[j+1] = chords[j+1], chords[j]
+			}
+		}
+	}
+}
+
+// getChordTypePriority returns a priority value for chord types (lower is higher priority)
+func getChordTypePriority(suffix string) int {
+	switch strings.ToLower(suffix) {
+	case "", "major":
+		return 0
+	case "minor", "m":
+		return 1
+	case "7":
+		return 2
+	case "maj7":
+		return 3
+	case "m7", "min7":
+		return 4
+	case "dim":
+		return 5
+	case "aug":
+		return 6
+	case "sus2":
+		return 7
+	case "sus4":
+		return 8
+	default:
+		return 100 // Low priority for uncommon types
+	}
+}
+
+// searchBothInMemory searches for chords by both name and fingering pattern
+func searchBothInMemory(query string) []*ChordWithMeta {
+	// First try chord name search
+	chordResults := searchByChordNameInMemory(query)
 
 	// If we have enough chord results, return them
 	if len(chordResults) >= 5 {
-		return chordResults[:5], nil
+		return chordResults[:5]
 	}
 
 	// Otherwise, try fingering search as well
-	fingeringResults, err := searchByFingering(query)
-	if err != nil {
-		return nil, err
-	}
+	fingeringResults := searchByFingeringInMemory(query)
 
 	// Combine results, prioritizing chord results
-	combinedResults := append(chordResults, fingeringResults...)
+	results := append(chordResults, fingeringResults...)
 
-	// Limit to 10 results
-	if len(combinedResults) > 10 {
-		combinedResults = combinedResults[:10]
+	// Remove duplicates
+	seen := make(map[string]bool)
+	var uniqueResults []*ChordWithMeta
+
+	for _, chord := range results {
+		key := chord.Key + "|" + chord.Suffix
+		if !seen[key] {
+			seen[key] = true
+			uniqueResults = append(uniqueResults, chord)
+		}
 	}
 
-	return combinedResults, nil
+	// Limit to 10 results
+	if len(uniqueResults) > 10 {
+		uniqueResults = uniqueResults[:10]
+	}
+
+	return uniqueResults
 }
