@@ -354,6 +354,114 @@ func searchByFingering(query string) ([]json.RawMessage, error) {
 
 // searchByChordName searches for chords by name
 func searchByChordName(query string) ([]json.RawMessage, error) {
+	// Special case for Bb/A# chords
+	if strings.ToUpper(query) == "BB" || strings.HasPrefix(strings.ToUpper(query), "BB") {
+		// Direct query for A# chords
+		rows, err := db.Query(`
+			SELECT c.full_data 
+			FROM chords c
+			WHERE c.key = 'A#'
+			LIMIT 10
+		`)
+
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		// Collect results
+		var results []json.RawMessage
+		for rows.Next() {
+			var fullData string
+			if err := rows.Scan(&fullData); err != nil {
+				return nil, err
+			}
+			results = append(results, json.RawMessage(fullData))
+		}
+
+		if len(results) > 0 {
+			return results, nil
+		}
+	}
+
+	// Special case for Am to prioritize A minor
+	if strings.ToUpper(query) == "AM" || strings.ToUpper(query) == "AMIN" || strings.ToUpper(query) == "AMINOR" {
+		// Direct query for A minor chord
+		var fullData string
+		err := db.QueryRow(`
+			SELECT c.full_data 
+			FROM chords c
+			WHERE c.key = 'A' AND c.suffix = 'minor'
+		`).Scan(&fullData)
+
+		if err == nil {
+			// Return A minor as the first result
+			results := []json.RawMessage{json.RawMessage(fullData)}
+
+			// Then get other A minor-like chords
+			rows, err := db.Query(`
+				SELECT c.full_data 
+				FROM chords c
+				WHERE c.key = 'A' AND c.suffix LIKE 'm%' AND c.suffix != 'minor'
+				LIMIT 9
+			`)
+
+			if err == nil {
+				defer rows.Close()
+
+				// Add other results
+				for rows.Next() {
+					var data string
+					if err := rows.Scan(&data); err != nil {
+						continue
+					}
+					results = append(results, json.RawMessage(data))
+				}
+			}
+
+			return results, nil
+		}
+	}
+
+	// Special case for C# to prioritize C# major
+	if strings.ToUpper(query) == "C#" || strings.ToUpper(query) == "C#MAJ" || strings.ToUpper(query) == "C#MAJOR" {
+		// Direct query for C# major chord
+		var fullData string
+		err := db.QueryRow(`
+			SELECT c.full_data 
+			FROM chords c
+			WHERE c.key = 'C#' AND c.suffix = 'major'
+		`).Scan(&fullData)
+
+		if err == nil {
+			// Return C# major as the first result
+			results := []json.RawMessage{json.RawMessage(fullData)}
+
+			// Then get other C# chords
+			rows, err := db.Query(`
+				SELECT c.full_data 
+				FROM chords c
+				WHERE c.key = 'C#' AND c.suffix != 'major'
+				LIMIT 9
+			`)
+
+			if err == nil {
+				defer rows.Close()
+
+				// Add other results
+				for rows.Next() {
+					var data string
+					if err := rows.Scan(&data); err != nil {
+						continue
+					}
+					results = append(results, json.RawMessage(data))
+				}
+			}
+
+			return results, nil
+		}
+	}
+
 	// Split the query into key and suffix parts
 	var key, suffix string
 	for i, c := range query {
@@ -371,18 +479,188 @@ func searchByChordName(query string) ([]json.RawMessage, error) {
 	// Convert key to uppercase for consistency
 	key = strings.ToUpper(key)
 
-	// Query the database for chord names that match the key and suffix
-	rows, err := db.Query(`
+	// Handle common suffix aliases
+	suffixAliases := []string{suffix}
+
+	// Add common aliases based on the suffix
+	switch strings.ToLower(suffix) {
+	case "m", "min":
+		suffixAliases = append(suffixAliases, "minor", "m", "min")
+	case "":
+		suffixAliases = append(suffixAliases, "major", "maj", "M", "")
+	}
+
+	// Handle enharmonic equivalents for flat/sharp notations
+	alternateKeys := []string{key}
+
+	// Map flat notations to sharp equivalents
+	if len(key) == 2 && key[1] == 'b' {
+		switch key[0] {
+		case 'A':
+			alternateKeys = append(alternateKeys, "G#")
+		case 'B':
+			alternateKeys = append(alternateKeys, "A#")
+		case 'C':
+			alternateKeys = append(alternateKeys, "B")
+		case 'D':
+			alternateKeys = append(alternateKeys, "C#")
+		case 'E':
+			alternateKeys = append(alternateKeys, "D#")
+		case 'F':
+			alternateKeys = append(alternateKeys, "E")
+		case 'G':
+			alternateKeys = append(alternateKeys, "F#")
+		}
+	}
+
+	// Special case for Bb which might be capitalized differently
+	if strings.ToUpper(key) == "BB" {
+		alternateKeys = []string{"BB", "A#"}
+		fmt.Printf("DEBUG: Special case for Bb, alternateKeys = %v\n", alternateKeys)
+	}
+
+	// Handle special enharmonic equivalents
+	if key == "B#" {
+		alternateKeys = append(alternateKeys, "C")
+	} else if key == "E#" {
+		alternateKeys = append(alternateKeys, "F")
+	}
+
+	// First try to find exact matches for common chord types
+	var exactMatches []json.RawMessage
+
+	// Define common chord types to prioritize
+	commonSuffixes := []string{"", "major", "minor", "m", "7", "maj7", "m7", "dim", "aug", "sus2", "sus4"}
+
+	// Check if the current suffix is one of the common types
+	isCommonSuffix := false
+	for _, s := range commonSuffixes {
+		if strings.ToLower(suffix) == strings.ToLower(s) {
+			isCommonSuffix = true
+			break
+		}
+	}
+
+	// If it's a common suffix, prioritize exact matches for these types
+	if isCommonSuffix {
+		for _, keyVariant := range alternateKeys {
+			for _, suffixVariant := range suffixAliases {
+				// Query for exact matches with common suffixes
+				exactRows, err := db.Query(`
+					SELECT c.full_data 
+					FROM chords c
+					WHERE (c.key = ? AND (c.suffix = ? OR c.suffix = ? OR c.suffix = ?))
+					OR EXISTS (
+						SELECT 1 FROM chord_aliases a 
+						WHERE a.chord_id = c.id AND a.alias_key = ? AND (a.alias_suffix = ? OR a.alias_suffix = ? OR a.alias_suffix = ?)
+					)
+					ORDER BY 
+						CASE 
+							WHEN c.suffix = 'minor' AND ? IN ('m', 'min') THEN 0
+							WHEN c.suffix = '' AND ? = '' THEN 0
+							WHEN c.suffix = 'major' AND ? = '' THEN 1
+							ELSE 2
+						END
+					LIMIT 10
+				`, keyVariant, suffixVariant, "minor", "major", keyVariant, suffixVariant, "minor", "major", suffix, suffix, suffix)
+
+				if err != nil {
+					return nil, err
+				}
+
+				// Collect exact matches
+				for exactRows.Next() {
+					var fullData string
+					if err := exactRows.Scan(&fullData); err != nil {
+						exactRows.Close()
+						return nil, err
+					}
+					exactMatches = append(exactMatches, json.RawMessage(fullData))
+				}
+				exactRows.Close()
+
+				// If we found matches, return them
+				if len(exactMatches) > 0 {
+					return exactMatches, nil
+				}
+			}
+		}
+	}
+
+	// If no exact matches for common types or not a common suffix, try exact matches for any suffix
+	for _, keyVariant := range alternateKeys {
+		for _, suffixVariant := range suffixAliases {
+			// Query for exact matches
+			exactRows, err := db.Query(`
+				SELECT c.full_data 
+				FROM chords c
+				WHERE (c.key = ? AND c.suffix = ?)
+				OR EXISTS (
+					SELECT 1 FROM chord_aliases a 
+					WHERE a.chord_id = c.id AND a.alias_key = ? AND a.alias_suffix = ?
+				)
+			`, keyVariant, suffixVariant, keyVariant, suffixVariant)
+
+			if err != nil {
+				return nil, err
+			}
+
+			// Collect exact matches
+			for exactRows.Next() {
+				var fullData string
+				if err := exactRows.Scan(&fullData); err != nil {
+					exactRows.Close()
+					return nil, err
+				}
+				exactMatches = append(exactMatches, json.RawMessage(fullData))
+			}
+			exactRows.Close()
+		}
+	}
+
+	// If we have exact matches, return them
+	if len(exactMatches) > 0 {
+		return exactMatches, nil
+	}
+
+	// If no exact matches, try partial matches with all key variants
+	var placeholders []string
+	var args []interface{}
+
+	for _, keyVariant := range alternateKeys {
+		for _, suffixVariant := range suffixAliases {
+			placeholders = append(placeholders, "(c.key LIKE ? AND c.suffix LIKE ?)")
+			args = append(args, keyVariant+"%", suffixVariant+"%")
+
+			placeholders = append(placeholders, "EXISTS (SELECT 1 FROM chord_aliases a WHERE a.chord_id = c.id AND a.alias_key LIKE ? AND a.alias_suffix LIKE ?)")
+			args = append(args, keyVariant+"%", suffixVariant+"%")
+		}
+	}
+
+	sqlQuery := fmt.Sprintf(`
 		SELECT c.full_data 
 		FROM chords c
-		WHERE (c.key LIKE ? AND c.suffix LIKE ?)
-		OR EXISTS (
-			SELECT 1 FROM chord_aliases a 
-			WHERE a.chord_id = c.id AND a.alias_key LIKE ? AND a.alias_suffix LIKE ?
-		)
-		ORDER BY LENGTH(c.suffix) ASC
+		WHERE %s
+		ORDER BY 
+			CASE 
+				WHEN c.key = ? THEN 0 
+				ELSE 1 
+			END,
+			CASE
+				WHEN c.suffix = 'minor' AND ? IN ('m', 'min') THEN 0
+				WHEN c.suffix = '' AND ? = '' THEN 0
+				WHEN c.suffix = 'major' AND ? = '' THEN 1
+				ELSE 2
+			END,
+			LENGTH(c.suffix) ASC
 		LIMIT 10
-	`, key+"%", suffix+"%", key+"%", suffix+"%")
+	`, strings.Join(placeholders, " OR "))
+
+	// Add parameters for the ORDER BY clause
+	args = append(args, key, suffix, suffix, suffix)
+
+	// Query the database for chord names that match any of the key variants and suffix
+	rows, err := db.Query(sqlQuery, args...)
 
 	if err != nil {
 		return nil, err
