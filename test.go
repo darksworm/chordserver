@@ -45,6 +45,19 @@ func main() {
 		"x22220", // A add9 chord with B in bass
 	}
 
+	// Test search queries
+	testSearches := []struct {
+		name  string
+		query string
+	}{
+		{"Chord name - A", "A"},
+		{"Chord name - Am", "Am"},
+		{"Chord name - C7", "C7"},
+		{"Fingering pattern - 022000", "022000"},
+		{"Fingering pattern - 320003", "320003"},
+		{"Ambiguous - A7", "A7"},
+	}
+
 	// Start the server as a separate process with custom port
 	cmd := exec.Command("go", "run", "server.go", "-port", fmt.Sprintf("%d", testPort))
 	cmd.Stdout = os.Stdout
@@ -220,14 +233,104 @@ func main() {
 		fmt.Println()
 	}
 
+	// Track test results for search
+	totalSearchTests := len(testSearches)
+	passedSearchTests := 0
+	failedSearchTests := 0
+
+	// Test each search query
+	fmt.Printf("\n=== TESTING SEARCH ENDPOINT ===\n\n")
+	for _, tc := range testSearches {
+		fmt.Printf("Testing %s with query '%s':\n", tc.name, tc.query)
+
+		// Make request to search endpoint
+		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/search/%s", testPort, tc.query))
+		if err != nil {
+			fmt.Printf("ERROR: Failed to make request for search %s: %v\n", tc.query, err)
+			failedSearchTests++
+			continue
+		}
+
+		// Read response
+		body, err := ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			fmt.Printf("ERROR: Failed to read response for search %s: %v\n", tc.query, err)
+			failedSearchTests++
+			continue
+		}
+
+		// Check status code
+		if resp.StatusCode != http.StatusOK {
+			fmt.Printf("FAILURE: Search for '%s' failed. Status: %d\n", tc.query, resp.StatusCode)
+			fmt.Printf("Response: %s\n", string(body))
+			failedSearchTests++
+			continue
+		}
+
+		// Parse JSON response
+		var results []json.RawMessage
+		if err := json.Unmarshal(body, &results); err != nil {
+			fmt.Printf("ERROR: Invalid JSON response for search %s: %v\n", tc.query, err)
+			fmt.Printf("Response: %s\n", string(body))
+			failedSearchTests++
+			continue
+		}
+
+		// Verify we got at least one result
+		if len(results) == 0 {
+			fmt.Printf("ERROR: No results returned for search %s\n", tc.query)
+			fmt.Printf("Response: %s\n", string(body))
+			failedSearchTests++
+			continue
+		}
+
+		// Verify each result has a valid structure
+		validResults := true
+		for i, resultJSON := range results {
+			var resultData map[string]interface{}
+			if err := json.Unmarshal(resultJSON, &resultData); err != nil {
+				fmt.Printf("ERROR: Invalid result JSON at index %d for search %s: %v\n", i, tc.query, err)
+				fmt.Printf("Result JSON: %s\n", string(resultJSON))
+				validResults = false
+				break
+			}
+
+			// Verify required fields (key and positions)
+			if resultData["key"] == nil || resultData["positions"] == nil {
+				fmt.Printf("ERROR: Missing required fields in result at index %d for search %s\n", i, tc.query)
+				fmt.Printf("Result JSON: %s\n", string(resultJSON))
+				validResults = false
+				break
+			}
+		}
+
+		if validResults {
+			fmt.Printf("SUCCESS: Found %d result(s) for search '%s'!\n", len(results), tc.query)
+			// Print first result
+			var firstResult map[string]interface{}
+			if err := json.Unmarshal(results[0], &firstResult); err == nil {
+				fmt.Printf("  First result: %s %s\n",
+					firstResult["key"],
+					firstResult["suffix"])
+			}
+			passedSearchTests++
+		} else {
+			failedSearchTests++
+		}
+
+		fmt.Println()
+	}
+
 	// Print test summary
 	fmt.Printf("=== TEST SUMMARY ===\n")
 	fmt.Printf("Chord tests: %d total, %d passed, %d failed\n", totalChordTests, passedChordTests, failedChordTests)
 	fmt.Printf("Finger tests: %d total, %d passed, %d failed\n", totalFingerTests, passedFingerTests, failedFingerTests)
+	fmt.Printf("Search tests: %d total, %d passed, %d failed\n", totalSearchTests, passedSearchTests, failedSearchTests)
 
-	totalTests := totalChordTests + totalFingerTests
-	passedTests := passedChordTests + passedFingerTests
-	failedTests := failedChordTests + failedFingerTests
+	totalTests := totalChordTests + totalFingerTests + totalSearchTests
+	passedTests := passedChordTests + passedFingerTests + passedSearchTests
+	failedTests := failedChordTests + failedFingerTests + failedSearchTests
 
 	fmt.Printf("Overall: %d total, %d passed, %d failed\n", totalTests, passedTests, failedTests)
 

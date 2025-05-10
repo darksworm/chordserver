@@ -50,6 +50,7 @@ func main() {
 	// Route handlers
 	mux.HandleFunc("/chords/", getChordByName)
 	mux.HandleFunc("/fingers/", getChordsByFingering)
+	mux.HandleFunc("/search/", searchChords)
 
 	// Apply CORS middleware
 	handler := corsMiddleware(mux)
@@ -238,4 +239,192 @@ func getChordsByFingering(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Fprint(w, string(response))
+}
+
+// searchChords handles the search endpoint that can search for both chord names and fingerings
+func searchChords(w http.ResponseWriter, r *http.Request) {
+	// Extract search query from URL
+	query := r.URL.Path[len("/search/"):]
+	if query == "" {
+		http.Error(w, "Search query required", http.StatusBadRequest)
+		return
+	}
+
+	// Prepare response
+	w.Header().Set("Content-Type", "application/json")
+
+	// Determine if the query is likely a fingering pattern or a chord name
+	isFingeringPattern := isLikelyFingeringPattern(query)
+	isChordName := isLikelyChordName(query)
+
+	// Results to return
+	var results []json.RawMessage
+	var err error
+
+	// If it's clearly a fingering pattern, search only fingerings
+	if isFingeringPattern && !isChordName {
+		results, err = searchByFingering(query)
+	} else if isChordName && !isFingeringPattern {
+		// If it's clearly a chord name, search only chord names
+		results, err = searchByChordName(query)
+	} else {
+		// If it could be either or we're not sure, search both but prioritize simpler chords
+		results, err = searchBoth(query)
+	}
+
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		log.Printf("Search error: %v", err)
+		return
+	}
+
+	if len(results) == 0 {
+		http.Error(w, "No results found", http.StatusNotFound)
+		return
+	}
+
+	// Return the results as JSON array
+	response, err := json.Marshal(results)
+	if err != nil {
+		http.Error(w, "Error encoding response", http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Fprint(w, string(response))
+}
+
+// isLikelyFingeringPattern determines if a query is likely a fingering pattern
+func isLikelyFingeringPattern(query string) bool {
+	// Fingering patterns typically contain only digits and 'x' for muted strings
+	for _, c := range query {
+		if !((c >= '0' && c <= '9') || c == 'x' || c == 'X') {
+			return false
+		}
+	}
+	return true
+}
+
+// isLikelyChordName determines if a query is likely a chord name
+func isLikelyChordName(query string) bool {
+	// Chord names typically start with a letter A-G, possibly followed by # or b
+	if len(query) == 0 {
+		return false
+	}
+
+	// Check if the first character is a valid chord key (A-G)
+	firstChar := query[0]
+	if !((firstChar >= 'A' && firstChar <= 'G') || (firstChar >= 'a' && firstChar <= 'g')) {
+		return false
+	}
+
+	return true
+}
+
+// searchByFingering searches for chords by fingering pattern
+func searchByFingering(query string) ([]json.RawMessage, error) {
+	// Query the database for fingerings that start with the query
+	rows, err := db.Query(`
+		SELECT c.full_data 
+		FROM chords c
+		JOIN fingerings f ON c.id = f.chord_id
+		WHERE f.frets LIKE ?
+		LIMIT 10
+	`, query+"%")
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Collect results
+	var results []json.RawMessage
+	for rows.Next() {
+		var fullData string
+		if err := rows.Scan(&fullData); err != nil {
+			return nil, err
+		}
+		results = append(results, json.RawMessage(fullData))
+	}
+
+	return results, nil
+}
+
+// searchByChordName searches for chords by name
+func searchByChordName(query string) ([]json.RawMessage, error) {
+	// Split the query into key and suffix parts
+	var key, suffix string
+	for i, c := range query {
+		if !((c >= 'A' && c <= 'G') || (c >= 'a' && c <= 'g') || c == '#' || c == 'b') {
+			key = query[:i]
+			suffix = query[i:]
+			break
+		}
+	}
+	if key == "" {
+		key = query
+		suffix = ""
+	}
+
+	// Convert key to uppercase for consistency
+	key = strings.ToUpper(key)
+
+	// Query the database for chord names that match the key and suffix
+	rows, err := db.Query(`
+		SELECT c.full_data 
+		FROM chords c
+		WHERE (c.key LIKE ? AND c.suffix LIKE ?)
+		OR EXISTS (
+			SELECT 1 FROM chord_aliases a 
+			WHERE a.chord_id = c.id AND a.alias_key LIKE ? AND a.alias_suffix LIKE ?
+		)
+		ORDER BY LENGTH(c.suffix) ASC
+		LIMIT 10
+	`, key+"%", suffix+"%", key+"%", suffix+"%")
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Collect results
+	var results []json.RawMessage
+	for rows.Next() {
+		var fullData string
+		if err := rows.Scan(&fullData); err != nil {
+			return nil, err
+		}
+		results = append(results, json.RawMessage(fullData))
+	}
+
+	return results, nil
+}
+
+// searchBoth searches for both chord names and fingerings, prioritizing simpler chords
+func searchBoth(query string) ([]json.RawMessage, error) {
+	// First try chord name search
+	chordResults, err := searchByChordName(query)
+	if err != nil {
+		return nil, err
+	}
+
+	// If we have enough chord results, return them
+	if len(chordResults) >= 5 {
+		return chordResults[:5], nil
+	}
+
+	// Otherwise, try fingering search as well
+	fingeringResults, err := searchByFingering(query)
+	if err != nil {
+		return nil, err
+	}
+
+	// Combine results, prioritizing chord results
+	combinedResults := append(chordResults, fingeringResults...)
+
+	// Limit to 10 results
+	if len(combinedResults) > 10 {
+		combinedResults = combinedResults[:10]
+	}
+
+	return combinedResults, nil
 }

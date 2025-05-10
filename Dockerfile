@@ -39,7 +39,7 @@ COPY --from=db-builder /app/chords.db ./chords.db
 
 # Copy server and test files
 COPY server.go ./
-COPY test_chords.go ./
+COPY test.go ./
 
 # Run custom tests
 RUN go run test.go
