@@ -101,6 +101,11 @@ func normalizeSuffix(suffix string) string {
 	return suffix
 }
 
+// healthcheck responds with a 200 status code for health monitoring
+func healthcheck(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+}
+
 func main() {
 	// Parse command line flags
 	port := flag.Int("port", 8080, "Port to run the server on")
@@ -125,6 +130,7 @@ func main() {
 	mux.HandleFunc("/chords/", getChordByName)
 	mux.HandleFunc("/fingers/", getChordsByFingering)
 	mux.HandleFunc("/search/", searchChords)
+	mux.HandleFunc("/healthcheck", healthcheck)
 
 	// Apply CORS middleware
 	handler := corsMiddleware(mux)
