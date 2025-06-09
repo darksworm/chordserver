@@ -131,6 +131,7 @@ func main() {
 	mux.HandleFunc("/fingers/", getChordsByFingering)
 	mux.HandleFunc("/search/", searchChords)
 	mux.HandleFunc("/healthcheck", healthcheck)
+	mux.HandleFunc("/", healthcheck)
 
 	// Apply CORS middleware
 	handler := corsMiddleware(mux)
