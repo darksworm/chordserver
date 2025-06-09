@@ -108,7 +108,7 @@ func healthcheck(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	// Parse command line flags
-	port := flag.Int("port", 8080, "Port to run the server on")
+	port := flag.Int("port", 80, "Port to run the server on")
 	flag.Parse()
 
 	var err error

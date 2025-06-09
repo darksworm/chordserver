@@ -69,6 +69,6 @@ COPY --from=app-builder /app/chordserver /chordserver
 COPY --from=db-builder /app/chords.db /chords.db
 
 # Expose the port your server listens on
-EXPOSE 8080
+EXPOSE 80
 
 ENTRYPOINT ["/chordserver"]
